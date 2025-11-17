@@ -4,7 +4,7 @@ import {
   uploadProfileImage,
   verifyResponder,
 } from "../controllers/profileController.js";
-import { authenticate, authorizeRoles } from "../middlewares/auth.js";
+import { authenticate, authorizeRoles } from "../middlewares/authMiddleware.js";
 
 export default async function profileRoutes(fastify) {
   fastify.get("/", { preHandler: [authenticate] }, getProfile);

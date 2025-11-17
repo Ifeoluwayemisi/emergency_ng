@@ -20,7 +20,8 @@ model User {
   password             String
   role                 Role                 @default(USER)
   phone                String?
-  location             String?
+  latitude    Float?    // last known latitude
+  longitude   Float?    // last known longitude  
   profileImg           String?
   verified             Boolean              @default(false)
   createdAt            DateTime             @default(now())
@@ -39,7 +40,9 @@ model Emergency {
   responders  ResponderEmergency[]
   createdAt   DateTime             @default(now())
   updatedAt   DateTime             @updatedAt
-  location    String
+  latitude    Float
+  longitude   Float
+  address     String?   // optional human-readable address
 }
 
 model ResponderEmergency {
