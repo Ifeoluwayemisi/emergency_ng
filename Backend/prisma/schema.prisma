@@ -4,12 +4,81 @@
 // Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
 // Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
 
-generator client {
-  provider = "prisma-client"
-  output   = "../src/generated/prisma"
-}
-
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id                   Int                  @id @default(autoincrement())
+  name                 String
+  email                String               @unique
+  password             String
+  role                 Role                 @default(USER)
+  phone                String?
+  location             String?
+  profileImg           String?
+  verified             Boolean              @default(false)
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  emergencies          Emergency[]
+  responderEmergencies ResponderEmergency[]
+}
+
+model Emergency {
+  id          Int                  @id @default(autoincrement())
+  user        User                 @relation(fields: [userId], references: [id])
+  userId      Int
+  description String
+  category    EmergencyCategory
+  status      EmergencyStatus      @default(PENDING)
+  responders  ResponderEmergency[]
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  location    String
+}
+
+model ResponderEmergency {
+  id          Int       @id @default(autoincrement())
+  emergency   Emergency @relation(fields: [emergencyId], references: [id])
+  emergencyId Int
+  responder   User      @relation(fields: [responderId], references: [id])
+  responderId Int
+  accepted    Boolean   @default(false)
+  respondedAt DateTime?
+}
+
+model FirstAid {
+  id        Int      @id @default(autoincrement())
+  title     String
+  category  String
+  content   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum Role {
+  USER
+  RESPONDER
+}
+
+enum EmergencyStatus {
+  PENDING
+  ACCEPTED
+  COMPLETED
+  CANCELLED
+}
+
+enum EmergencyCategory {
+  CPR
+  BLEEDING
+  BURNS
+  SEIZURE
+  CHOKING
+  ASTHMA
+  OTHER
 }

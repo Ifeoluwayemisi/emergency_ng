@@ -7,24 +7,29 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const fastify = Fastify({ logger: true});
+const fastify = Fastify({ logger: true });
 
 //plugins
-await fastify.register(cors, {origin: '*'});
+await fastify.register(cors, { origin: "*" });
 await fastify.register(jwt, { secret: process.env.JWT_SECRET });
 await fastify.register(multipart);
-await fastify.register(websocket)
+await fastify.register(websocket);
+import authRoutes from "./routes/authRoute";
+import profileRoutes from "./routes/profileRoute";
 
 //root route
 fastify.get("/", async (request, reply) => {
   return { message: "RapidAid Backend is Running" };
 });
 
-// TODO: 
-//  
+// TODO:
+await fastify.register(authRoutes, {prefix: '/auth'});
+await fastify.register(profileRoutes, {prefix: '/profile'});
+// fastify.register(emergencyRoutes, {prefix: '/emergency'});
+// fastify.register(firstAidRoutes, {prefix: 'first-aid'})
 
 const PORT = process.env.PORT || 4000;
-fastify.listen({ port: PORT}, (err, address) => {
-    if (err) throw err;
-    console.log(`Server running at ${address}`)
-})
+fastify.listen({ port: PORT }, (err, address) => {
+  if (err) throw err;
+  console.log(`Server running at ${address}`);
+});

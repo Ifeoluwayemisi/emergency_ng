@@ -4,10 +4,14 @@
   "description": "An emergency app",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
+  "dev": "nodemon index.js",
+  "start": "node index.js",
+  "prisma": "prisma"
+},
+
   "author": "Team Lumora",
   "license": "ISC",
+  "type": "module",
   "dependencies": {
     "@prisma/client": "^6.19.0",
     "axios": "^1.13.2",
@@ -20,7 +24,12 @@
     "fastify-multipart": "^5.3.1",
     "fastify-websocket": "^4.2.2",
     "nodemailer": "^7.0.10",
+    "nodemon": "^3.1.11",
+    "pg": "^8.16.3",
     "prisma": "^6.19.0",
     "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "dotenv-cli": "^11.0.0"
   }
 }
