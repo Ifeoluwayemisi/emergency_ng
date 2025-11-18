@@ -1,60 +1,117 @@
 import fp from "fastify-plugin";
+import IORedis from "ioredis";
 import jwt from "jsonwebtoken";
-import { prisma } from "../utils/prisma.js";
-import { haversineDistance } from "../utils/geo.js";
-
-/** websocket handler plugin for emergency help
- * 
- * Responsibiliteis:
- * - Authenticate socket connections via jwt
- * - manage connection registry (userId -> ws)
- * - handle incoming messages:
- *   - join_room / leave_room (emergencyId), location_update, responder_accept, responder_reject, complete_emergency
- * -  Broadcast server -> client messages:
- *   - to specific users (e.g. notify user when responder accepts)
- *   - to rooms (e.g. broadcast location updates to all in emergency room)
- * - Maintain in-memory registries of connections and "rooms" per emergency
- * 
- *  **/
 
 export default fp(async (fastify, opts) => {
-  // in memory registries
+  const REDIS_URL = process.env.REDIS_URL;
+  const pub = new IORedis(REDIS_URL);
+  const sub = new IORedis(REDIS_URL);
+
+  // Local registries
   const connections = new Map(); // userId -> ws
-  const rooms = new Map(); // emergencyId -> Set<userId>
-  const socketToUser = new WeakMap();
+  const rooms = new Map(); // roomId (emergencyId or 'responders') -> Set(userId)
 
-  // helpers
-  function sendToUser(userId, payload) {
+  // Subscribe to room channels pattern: room:*
+  await sub.psubscribe("room:*");
+
+  sub.on("pmessage", (pattern, channel, message) => {
+    try {
+      const roomId = channel.split(":")[1];
+      const payload = JSON.parse(message);
+      const members = rooms.get(String(roomId));
+      if (!members) return;
+      members.forEach((memberId) => {
+        const sock = connections.get(String(memberId));
+        if (sock && sock.readyState === 1) {
+          try {
+            sock.send(JSON.stringify(payload));
+          } catch (e) {
+            /* ignore */
+          }
+        }
+      });
+    } catch (err) {
+      fastify.log.error("Redis pmessage handler error", err);
+    }
+  });
+
+  // Helpers
+  function localSendToUser(userId, payload) {
     const sock = connections.get(String(userId));
-    if (sock && sock.readyState === 1) sock.send(JSON.stringify(payload));
+    if (sock && sock.readyState === 1) {
+      try {
+        sock.send(JSON.stringify(payload));
+      } catch (e) {
+        /* ignore */
+      }
+      return true;
+    }
+    return false;
   }
 
-  function broadcastToUsers(userIds = [], payload) {
-    userIds.forEach((id) => sendToUser(id, payload));
+  async function wsSendToUser(userId, payload) {
+    // attempt local send
+    const sent = localSendToUser(userId, payload);
+    if (!sent) {
+      // nothing connected locally: publish to user's personal channel (optional) or fallback to queue
+      // We'll publish to room:user:<userId> so other instances can deliver if connected there
+      await pub.publish(`room:user:${userId}`, JSON.stringify(payload));
+    }
   }
 
-  function broadcastToRoom(emergencyId, payload) {
-    const set = rooms.get(String(emergencyId));
-    if (!set) return;
-    set.forEach((userId) => sendToUser(userId, payload));
+  async function wsBroadcastToUsers(userIds = [], payload) {
+    const localDelivered = [];
+    const remote = [];
+    userIds.forEach((id) => {
+      const sent = localSendToUser(id);
+      if (!sent) remote.push(id);
+      else localDelivered.push(id);
+    });
+    if (remote.length) {
+      // publish a message to a dedicated channel; other instances should have room membership
+      // we publish per-user for reliability
+      await Promise.all(
+        remote.map((id) =>
+          pub.publish(`room:user:${id}`, JSON.stringify(payload))
+        )
+      );
+    }
   }
 
-  // attach helpers to Fastify instance
+  async function wsBroadcastToRoom(roomId, payload) {
+    // local deliver
+    const members = rooms.get(String(roomId));
+    if (members) {
+      members.forEach((memberId) => {
+        const sock = connections.get(String(memberId));
+        if (sock && sock.readyState === 1) {
+          try {
+            sock.send(JSON.stringify(payload));
+          } catch (e) {
+            /* ignore */
+          }
+        }
+      });
+    }
+    // publish to redis channel so other instances pick it up
+    await pub.publish(`room:${roomId}`, JSON.stringify(payload));
+  }
+
+  fastify.decorate("wsSendToUser", wsSendToUser);
+  fastify.decorate("wsBroadcastToUsers", wsBroadcastToUsers);
+  fastify.decorate("wsBroadcastToRoom", wsBroadcastToRoom);
   fastify.decorate("wsConnections", connections);
   fastify.decorate("wsRooms", rooms);
-  fastify.decorate("wsSendToUser", sendToUser);
-  fastify.decorate("wsBroadcastToUsers", broadcastToUsers);
-  fastify.decorate("wsBroadcastToRoom", broadcastToRoom);
 
-  // compute rough ETA in minutes
-  function computeEtaKm(distanceKm) {
-    const avgKmPerMin = 40 / 60; // 40 km/h
-    return `${Math.max(1, Math.round(distanceKm / avgKmPerMin))} mins`;
-  }
+  // WebSocket endpoint
+  fastify.get("/ws", { websocket: true }, (connection, req) => {
+    // token in query: /ws?token=...
+    const url = req.url || "";
+    const tokenMatch = url.split("?token=")[1];
+    const token = tokenMatch
+      ? decodeURIComponent(tokenMatch.split("&")[0])
+      : null;
 
-  // === WebSocket endpoint ===
-  fastify.get("/ws", { websocket: true }, async (connection, req) => {
-    const token = req.url.split("?token=")[1];
     if (!token) {
       connection.socket.send(
         JSON.stringify({ type: "error", message: "No token provided" })
@@ -65,8 +122,8 @@ export default fp(async (fastify, opts) => {
 
     let payload;
     try {
-      payload = jwt.verify(decodeURIComponent(token), process.env.JWT_SECRET);
-    } catch {
+      payload = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (err) {
       connection.socket.send(
         JSON.stringify({ type: "error", message: "Invalid token" })
       );
@@ -75,16 +132,18 @@ export default fp(async (fastify, opts) => {
     }
 
     const userId = String(payload.id);
+    // register connection
     connections.set(userId, connection.socket);
-    socketToUser.set(connection.socket, userId);
+
+    // send ack
     connection.socket.send(JSON.stringify({ type: "connected", userId }));
 
-    // === message handler ===
+    // message handler
     connection.socket.on("message", async (msg) => {
       let data;
       try {
         data = JSON.parse(msg.toString());
-      } catch {
+      } catch (e) {
         connection.socket.send(
           JSON.stringify({ type: "error", message: "Invalid JSON" })
         );
@@ -92,162 +151,105 @@ export default fp(async (fastify, opts) => {
       }
 
       const type = data.type;
-
       try {
-        // --- JOIN ROOM ---
         if (type === "join_room") {
-          const { emergencyId } = data;
-          if (!emergencyId) throw new Error("emergencyId required");
-          if (!rooms.has(emergencyId)) rooms.set(emergencyId, new Set());
-          rooms.get(emergencyId).add(userId);
+          const { roomId } = data; // use roomId instead of emergencyId (flexible)
+          if (!roomId) {
+            connection.socket.send(
+              JSON.stringify({ type: "error", message: "roomId required" })
+            );
+            return;
+          }
+          if (!rooms.has(String(roomId))) rooms.set(String(roomId), new Set());
+          rooms.get(String(roomId)).add(userId);
           connection.socket.send(
-            JSON.stringify({ type: "joined_room", room: emergencyId })
+            JSON.stringify({ type: "joined_room", roomId })
           );
           return;
         }
 
-        // --- LEAVE ROOM ---
         if (type === "leave_room") {
-          const { emergencyId } = data;
-          rooms.get(emergencyId)?.delete(userId);
-          connection.socket.send(
-            JSON.stringify({ type: "left_room", room: emergencyId })
-          );
+          const { roomId } = data;
+          if (roomId && rooms.has(String(roomId)))
+            rooms.get(String(roomId)).delete(userId);
+          connection.socket.send(JSON.stringify({ type: "left_room", roomId }));
           return;
         }
 
-        // --- LOCATION UPDATE ---
         if (type === "location_update") {
-          const { emergencyId, latitude, longitude } = data;
+          const { roomId, latitude, longitude } = data;
           if (
-            !emergencyId ||
+            !roomId ||
             typeof latitude !== "number" ||
             typeof longitude !== "number"
           ) {
-            throw new Error("Invalid location_update payload");
+            connection.socket.send(
+              JSON.stringify({
+                type: "error",
+                message: "invalid location_update",
+              })
+            );
+            return;
           }
-
-          // update responder location in DB (non-blocking)
-          try {
-            await prisma.user.update({
-              where: { id: parseInt(userId) },
-              data: { latitude, longitude },
-            });
-          } catch {}
-
-          // compute ETA to emergency
-          let eta = null;
-          const emergency = await prisma.emergency.findUnique({
-            where: { id: parseInt(emergencyId) },
-          });
-          if (emergency) {
-            const dist = haversineDistance(
+          // publish to room so every instance delivers to local members
+          await pub.publish(
+            `room:${roomId}`,
+            JSON.stringify({
+              type: "responder_location",
+              roomId,
+              responderId: userId,
               latitude,
               longitude,
-              emergency.latitude,
-              emergency.longitude
-            );
-            eta = computeEtaKm(dist);
-          }
-
-          broadcastToRoom(emergencyId, {
-            type: "responder_location",
-            emergencyId,
-            responderId: userId,
-            latitude,
-            longitude,
-            eta,
-            timestamp: Date.now(),
-          });
+              timestamp: Date.now(),
+            })
+          );
           return;
         }
 
-        // --- RESPONDER ACCEPT ---
+        // responder_accept via ws
         if (type === "responder_accept") {
           const { emergencyId } = data;
-          await prisma.responderEmergency.updateMany({
-            where: {
-              emergencyId: parseInt(emergencyId),
-              responderId: parseInt(userId),
-            },
-            data: { accepted: true, respondedAt: new Date() },
-          });
-
-          await prisma.emergency.update({
-            where: { id: parseInt(emergencyId) },
-            data: { status: "ACCEPTED" },
-          });
-
-          const em = await prisma.emergency.findUnique({
-            where: { id: parseInt(emergencyId) },
-          });
-          if (em)
-            sendToUser(String(em.userId), {
-              type: "responder_accepted",
+          if (!emergencyId) {
+            connection.socket.send(
+              JSON.stringify({ type: "error", message: "emergencyId required" })
+            );
+            return;
+          }
+          // let controllers handle DB changes via REST or internal call — but we can notify
+          await pub.publish(
+            `room:${emergencyId}`,
+            JSON.stringify({
+              type: "responder_accept_request",
               emergencyId,
               responderId: userId,
-            });
-
-          broadcastToRoom(emergencyId, {
-            type: "responderAcceptedBroadcast",
-            emergencyId,
-            responderId: userId,
-          });
+            })
+          );
           return;
         }
 
-        // --- RESPONDER REJECT ---
-        if (type === "responder_reject") {
-          const { emergencyId } = data;
-          await prisma.responderEmergency.updateMany({
-            where: {
-              emergencyId: parseInt(emergencyId),
-              responderId: parseInt(userId),
-            },
-            data: { accepted: false, respondedAt: new Date() },
-          });
-          broadcastToRoom(emergencyId, {
-            type: "responder_rejected",
-            emergencyId,
-            responderId: userId,
-          });
+        // other message types forwarded as-is to the room
+        if (type === "generic_broadcast" && data.roomId) {
+          await pub.publish(
+            `room:${data.roomId}`,
+            JSON.stringify(data.payload)
+          );
           return;
         }
 
-        // --- COMPLETE EMERGENCY ---
-        if (type === "complete_emergency") {
-          const { emergencyId } = data;
-          await prisma.emergency.update({
-            where: { id: parseInt(emergencyId) },
-            data: { status: "COMPLETED" },
-          });
-          broadcastToRoom(emergencyId, {
-            type: "emergency_completed",
-            emergencyId,
-          });
-          return;
-        }
-
-        // --- UNKNOWN ---
         connection.socket.send(
           JSON.stringify({ type: "error", message: "Unknown message type" })
         );
       } catch (err) {
         connection.socket.send(
-          JSON.stringify({
-            type: "error",
-            message: err.message || "Server error",
-          })
+          JSON.stringify({ type: "error", message: err.message })
         );
       }
     });
 
-    // --- cleanup ---
     connection.socket.on("close", () => {
       connections.delete(userId);
+      // remove userId from rooms
       rooms.forEach((set) => set.delete(userId));
     });
   });
 });
-
-// this keeps connections and allows broadcasting to user/responder sockets and to "rooms" per emergency

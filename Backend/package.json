@@ -31,7 +31,8 @@
     "pg": "^8.16.3",
     "prisma": "^6.19.0",
     "twilio": "^5.10.5",
-    "uuid": "^13.0.0"
+    "uuid": "^13.0.0",
+    "zod": "^4.1.12"
   },
   "devDependencies": {
     "dotenv-cli": "^11.0.0"

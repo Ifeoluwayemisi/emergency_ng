@@ -6,7 +6,7 @@ import multipart from "fastify-multipart";
 import dotenv from "dotenv";
 import authRoutes from "./routes/authRoute.js";
 import profileRoutes from "./routes/profileRoute.js";
-import wsHandler from "./plugins/wsHandler.js";
+import wsPlugin from "./plugins/wsHandler.js";
 import emergencyRoutes from "./routes/emergencyRoute.js";
 
 dotenv.config();

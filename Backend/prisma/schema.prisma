@@ -1,8 +1,4 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// Prisma schema - production-ready
 
 datasource db {
   provider = "postgresql"
@@ -17,17 +13,23 @@ model User {
   id                   Int                  @id @default(autoincrement())
   name                 String
   email                String               @unique
-  password             String
+  password             String               // hashed!
   role                 Role                 @default(USER)
   phone                String?
-  latitude             Float? // last known latitude
-  longitude            Float? // last known longitude  
+  locationType         Location             @default(URBAN)
+  latitude             Float?               // last known latitude
+  longitude            Float?               // last known longitude
+  available            Boolean              @default(true) // for responders
   profileImg           String?
   verified             Boolean              @default(false)
   createdAt            DateTime             @default(now())
   updatedAt            DateTime             @updatedAt
+  deletedAt            DateTime?            // optional soft delete
+
   emergencies          Emergency[]
   responderEmergencies ResponderEmergency[]
+
+  @@index([latitude, longitude])
 }
 
 model Emergency {
@@ -38,12 +40,15 @@ model Emergency {
   category      EmergencyCategory
   status        EmergencyStatus      @default(PENDING)
   responders    ResponderEmergency[]
-  createdAt     DateTime             @default(now())
-  updatedAt     DateTime             @updatedAt
   latitude      Float
   longitude     Float
-  address       String? // optional human-readable address
+  address       String?
   notifications Notification[]
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+  deletedAt     DateTime?
+
+  @@index([status, createdAt])
 }
 
 model ResponderEmergency {
@@ -54,6 +59,8 @@ model ResponderEmergency {
   responderId Int
   accepted    Boolean   @default(false)
   respondedAt DateTime?
+
+  @@unique([emergencyId, responderId])
 }
 
 model FirstAid {
@@ -69,14 +76,16 @@ model Notification {
   id          Int                   @id @default(autoincrement())
   emergency   Emergency             @relation(fields: [emergencyId], references: [id])
   emergencyId Int
-  recipientId Int? // user id (responder or admin) – nullable for broadcast
-  channel     Channel // primary intent or last channel used
+  recipientId Int?                  // user id (responder or admin) – nullable for broadcast
+  channel     Channel
   status      NotifStatus           @default(PENDING)
   priority    Int                   @default(0)
   meta        Json?
+  attempts    NotificationAttempt[]
   createdAt   DateTime              @default(now())
   updatedAt   DateTime              @updatedAt
-  attempts    NotificationAttempt[]
+
+  @@index([status, priority])
 }
 
 model NotificationAttempt {
@@ -96,6 +105,12 @@ enum Channel {
   TWILIO_SMS
   WHATSAPP
   FCM_PUSH
+}
+
+enum Location {
+  URBAN
+  SEMI_URBAN
+  RURAL
 }
 
 enum NotifStatus {

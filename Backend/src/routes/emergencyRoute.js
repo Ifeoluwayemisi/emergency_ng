@@ -5,7 +5,7 @@ import {
   responderAccept,
   responderReject,
 } from "../controllers/emergencyController.js";
-import { authenticate } from "../middlewares/auth.js";
+import { authenticate } from "../middlewares/authMiddleware.js";
 
 export default async function emergencyRoutes(fastify) {
   fastify.post("/", { preHandler: [authenticate] }, createEmergency);

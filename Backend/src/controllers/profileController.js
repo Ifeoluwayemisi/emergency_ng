@@ -1,75 +1,95 @@
 import { prisma } from "../utils/prisma.js";
 import fs from "fs";
 import path from "path";
-import jwt from "jsonwebtoken";
+import { pipeline } from "stream/promises";
 
+/* ---------- Config ---------- */
+const UPLOAD_DIR = path.join(process.cwd(), "/uploads");
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
+
+/* ---------- Helpers ---------- */
+async function saveFile(file, prefix = "") {
+  const filename = `${prefix}_${Date.now()}_${file.filename}`;
+  const filepath = path.join(UPLOAD_DIR, filename);
+
+  // Use non-blocking write
+  await pipeline(file.file, fs.createWriteStream(filepath));
+
+  return `/uploads/${filename}`;
+}
+
+/* ---------- Controllers ---------- */
+
+// Get current user profile
 export async function getProfile(request, reply) {
-  const userId = request.user.id;
-  const user = await prisma.user.findUnique({ where: { id: userId } });
-  reply.send(user);
+  try {
+    const userId = request.user.id;
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    reply.send(user);
+  } catch (err) {
+    request.log?.error(err);
+    reply.code(500).send({ error: "Failed to fetch profile" });
+  }
 }
 
+// Update user profile (name, phone, location)
 export async function updateProfile(request, reply) {
-  const userId = request.user.id;
-  const { name, phone, location } = request.body;
+  try {
+    const userId = request.user.id;
+    const { name, phone, locationType } = request.body;
 
-  const updated = await prisma.user.update({
-    where: { id: userId },
-    data: { name, phone, location },
-  });
-  reply.send(updated);
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: { name, phone, locationType },
+    });
+
+    reply.send({ message: "Profile updated", profile: updated });
+  } catch (err) {
+    request.log?.error(err);
+    reply.code(500).send({ error: "Failed to update profile" });
+  }
 }
 
+// Upload profile image
 export async function uploadProfileImage(request, reply) {
-  const userId = request.user.id;
-  const data = await request.file(); // fastify-multipart
-  const uploadDir = path.join(process.cwd(), "/uploads");
-  if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
+  try {
+    const userId = request.user.id;
+    const data = await request.file(); // fastify-multipart
 
-  const filename = `${userId}_${Date.now()}_${data.filename}`;
-  const filepath = path.join(uploadDir, filename);
+    if (!data) return reply.code(400).send({ error: "No file uploaded" });
 
-  await data.toBuffer().then((buffer) => fs.writeFileSync(filepath, buffer));
+    const filePath = await saveFile(data, `user_${userId}`);
 
-  const updated = await prisma.user.update({
-    where: { id: userId },
-    data: { profileImg: `/uploads/${filename}` },
-  });
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: { profileImg: filePath },
+    });
 
-  reply.send(updated);
+    reply.send({ message: "Profile image updated", profile: updated });
+  } catch (err) {
+    request.log?.error(err);
+    reply.code(500).send({ error: "Failed to upload profile image" });
+  }
 }
 
-import { profileService } from "../services/profileService.js";
-
-export const updateProfile = async (req, res) => {
+// Toggle responder verification (admin endpoint / demo)
+export async function toggleResponderVerification(request, reply) {
   try {
-    const updated = await profileService.updateProfile(
-      req.user.id,
-      req.body,
-      req.file
-    );
-    res.json({ message: "Profile updated", profile: updated });
+    const { userId, verified } = request.body;
+
+    if (!userId) return reply.code(400).send({ error: "userId is required" });
+
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: { verified: verified ?? true }, // default true if not specified
+    });
+
+    reply.send({
+      message: `Responder verification updated`,
+      user: updated,
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    request.log?.error(err);
+    reply.code(500).send({ error: "Failed to toggle verification" });
   }
-};
-
-export const verifyResponder = async (req, res) => {
-  try {
-    const verified = await profileService.fakeVerifyResponder(req.params.id);
-    res.json({ message: "Responder verified (demo)", verified });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-
-//TODO: Fake verification endpoint (toggle verified for hackathon)
-export async function verifyResponder(request, reply) {
-  const { userId } = request.body; // admin triggers this in v2, here we fake
-  const updated = await prisma.user.update({
-    where: { id: userId },
-    data: { verified: true },
-  });
-  reply.send(updated);
 }
