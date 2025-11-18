@@ -39,6 +39,31 @@ export async function uploadProfileImage(request, reply) {
   reply.send(updated);
 }
 
+import { profileService } from "../services/profileService.js";
+
+export const updateProfile = async (req, res) => {
+  try {
+    const updated = await profileService.updateProfile(
+      req.user.id,
+      req.body,
+      req.file
+    );
+    res.json({ message: "Profile updated", profile: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+export const verifyResponder = async (req, res) => {
+  try {
+    const verified = await profileService.fakeVerifyResponder(req.params.id);
+    res.json({ message: "Responder verified (demo)", verified });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+
 //TODO: Fake verification endpoint (toggle verified for hackathon)
 export async function verifyResponder(request, reply) {
   const { userId } = request.body; // admin triggers this in v2, here we fake

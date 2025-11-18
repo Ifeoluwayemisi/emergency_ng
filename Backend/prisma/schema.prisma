@@ -20,8 +20,8 @@ model User {
   password             String
   role                 Role                 @default(USER)
   phone                String?
-  latitude    Float?    // last known latitude
-  longitude   Float?    // last known longitude  
+  latitude             Float? // last known latitude
+  longitude            Float? // last known longitude  
   profileImg           String?
   verified             Boolean              @default(false)
   createdAt            DateTime             @default(now())
@@ -31,18 +31,19 @@ model User {
 }
 
 model Emergency {
-  id          Int                  @id @default(autoincrement())
-  user        User                 @relation(fields: [userId], references: [id])
-  userId      Int
-  description String
-  category    EmergencyCategory
-  status      EmergencyStatus      @default(PENDING)
-  responders  ResponderEmergency[]
-  createdAt   DateTime             @default(now())
-  updatedAt   DateTime             @updatedAt
-  latitude    Float
-  longitude   Float
-  address     String?   // optional human-readable address
+  id            Int                  @id @default(autoincrement())
+  user          User                 @relation(fields: [userId], references: [id])
+  userId        Int
+  description   String
+  category      EmergencyCategory
+  status        EmergencyStatus      @default(PENDING)
+  responders    ResponderEmergency[]
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+  latitude      Float
+  longitude     Float
+  address       String? // optional human-readable address
+  notifications Notification[]
 }
 
 model ResponderEmergency {
@@ -62,6 +63,45 @@ model FirstAid {
   content   String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+model Notification {
+  id          Int                   @id @default(autoincrement())
+  emergency   Emergency             @relation(fields: [emergencyId], references: [id])
+  emergencyId Int
+  recipientId Int? // user id (responder or admin) – nullable for broadcast
+  channel     Channel // primary intent or last channel used
+  status      NotifStatus           @default(PENDING)
+  priority    Int                   @default(0)
+  meta        Json?
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+  attempts    NotificationAttempt[]
+}
+
+model NotificationAttempt {
+  id             Int          @id @default(autoincrement())
+  notification   Notification @relation(fields: [notificationId], references: [id])
+  notificationId Int
+  channel        Channel
+  success        Boolean
+  response       String?
+  errorMessage   String?
+  triedAt        DateTime     @default(now())
+}
+
+enum Channel {
+  EMAIL
+  TERMII_SMS
+  TWILIO_SMS
+  WHATSAPP
+  FCM_PUSH
+}
+
+enum NotifStatus {
+  PENDING
+  SENT
+  FAILED
 }
 
 enum Role {

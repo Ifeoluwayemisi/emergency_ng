@@ -1,76 +1,129 @@
-import { prisma } from '../utils/prisma.js';
-import { haversineDistance } from '../utils/geo.js';
+import { prisma } from "../utils/prisma.js";
+import { haversineDistance } from "../utils/geo.js";
+import { enqueueNotification } from "../queues/notificationQueue.js";
 
-const FIND_RADIUS_KM = 6; // choose 5-10km for hackathon
+const FIND_RADIUS_KM = 6;
 
 export async function createEmergency(request, reply) {
   try {
+    if (!request.user) return reply.code(401).send({ error: "Unauthorized" });
     const userId = request.user.id;
-    const { description, category, latitude, longitude, address } = request.body;
-    if (!latitude || !longitude) return reply.code(400).send({ error: 'latitude and longitude required' });
+    const user = request.user;
 
-    // create emergency
+    const { description, category, latitude, longitude, address } =
+      request.body;
+    if (!latitude || !longitude) {
+      return reply.code(400).send({ error: "latitude and longitude required" });
+    }
+
+    const lat = parseFloat(latitude);
+    const lng = parseFloat(longitude);
+
+    // Create emergency record
     const emergency = await prisma.emergency.create({
       data: {
         userId,
         description,
         category,
-        latitude: parseFloat(latitude),
-        longitude: parseFloat(longitude),
-        address
-      }
+        latitude: lat,
+        longitude: lng,
+        address,
+      },
     });
 
-    // find candidate responders (verified RESPONDERs with last known coords)
+    // Find nearby responders
     const candidates = await prisma.user.findMany({
       where: {
-        role: 'RESPONDER',
+        role: "RESPONDER",
         verified: true,
         latitude: { not: null },
-        longitude: { not: null }
-      }
+        longitude: { not: null },
+      },
     });
 
-    // compute distance and pick responders within radius, order by distance
     const respondersWithDistance = candidates
-      .map(r => {
-        const dist = haversineDistance(latitude, longitude, r.latitude, r.longitude);
-        return { responder: r, distanceKm: dist };
-      })
-      .filter(x => x.distanceKm <= FIND_RADIUS_KM)
-      .sort((a,b) => a.distanceKm - b.distanceKm);
+      .map((r) => ({
+        responder: r,
+        distanceKm: haversineDistance(lat, lng, r.latitude, r.longitude),
+      }))
+      .filter((x) => x.distanceKm <= FIND_RADIUS_KM)
+      .sort((a, b) => a.distanceKm - b.distanceKm);
 
-    // pick top N responders (e.g., first 5)
     const selected = respondersWithDistance.slice(0, 6);
 
-    // create ResponderEmergency rows
-    const reRecords = await Promise.all(selected.map(s =>
-      prisma.responderEmergency.create({
-        data: {
-          emergencyId: emergency.id,
-          responderId: s.responder.id
-        }
-      })
-    ));
+    //Link responders to emergency
+    await Promise.all(
+      selected.map((s) =>
+        prisma.responderEmergency.create({
+          data: { emergencyId: emergency.id, responderId: s.responder.id },
+        })
+      )
+    );
 
-    // Notify responders via websocket (and optionally SMS/email)
-    const responderIds = selected.map(s => s.responder.id);
-    const payload = {
-      type: 'newEmergency',
-      emergency: {
-        id: emergency.id,
-        description: emergency.description,
-        category: emergency.category,
-        latitude: emergency.latitude,
-        longitude: emergency.longitude,
-        address: emergency.address,
-        createdAt: emergency.createdAt
-      }
+    // Build notification payload
+    const basePayload = {
+      title: "New emergency near you",
+      body: `${emergency.description} — ${
+        emergency.address || `${lat},${lng}`
+      }`,
+      sms: `Emergency: ${emergency.description}. Loc: ${lat},${lng}`,
+      html: `<p>${emergency.description}</p><p>Location: ${
+        emergency.address || `${lat},${lng}`
+      }</p>`,
     };
 
-    // broadcast
-    request.server.broadcastToUsers(responderIds, payload);
+    //Create and enqueue notifications for responders
+    for (const s of selected) {
+      const notif = await prisma.notification.create({
+        data: {
+          emergencyId: emergency.id,
+          recipientId: s.responder.id,
+          channel: "TERMII_SMS",
+          priority: 1,
+          meta: { responderName: s.responder.name },
+        },
+      });
 
+      await enqueueNotification({
+        notificationId: notif.id,
+        emergencyId: emergency.id,
+        recipientId: s.responder.id,
+        payload: { ...basePayload, responderName: s.responder.name },
+      });
+    }
+
+    //Admin alerts
+    const adminPhones = (process.env.ADMIN_PHONES || "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+    for (const phone of adminPhones) {
+      const notif = await prisma.notification.create({
+        data: {
+          emergencyId: emergency.id,
+          recipientId: null,
+          channel: "TERMII_SMS",
+          priority: 0,
+          meta: { adminPhone: phone },
+        },
+      });
+
+      await enqueueNotification({
+        notificationId: notif.id,
+        emergencyId: emergency.id,
+        recipientId: null,
+        payload: { ...basePayload, sms: `ADMIN ALERT: ${basePayload.sms}` },
+      });
+    }
+
+    // WebSocket broadcast to responders
+    const responderIds = selected.map((s) => s.responder.id);
+    request.server.broadcastToUsers(responderIds, {
+      type: "newEmergency",
+      emergency,
+    });
+
+    //Response
     return reply.send({ emergency, notifiedResponders: responderIds });
   } catch (err) {
     console.error(err);
@@ -78,30 +131,26 @@ export async function createEmergency(request, reply) {
   }
 }
 
-export async function getEmergency(request, reply) {
-  const { id } = request.params;
-  const emergency = await prisma.emergency.findUnique({
-    where: { id: parseInt(id) },
-    include: { responders: { include: { responder: true } }, user: true }
-  });
-  if (!emergency) return reply.code(404).send({ error: 'Not found' });
-  reply.send(emergency);
-}
-
 export async function cancelEmergency(request, reply) {
   const { id } = request.params;
   const userId = request.user.id;
-  const emergency = await prisma.emergency.findUnique({ where: { id: parseInt(id) } });
-  if (!emergency) return reply.code(404).send({ error: 'Not found' });
-  if (emergency.userId !== userId) return reply.code(403).send({ error: 'Not your emergency' });
+  const emergency = await prisma.emergency.findUnique({
+    where: { id: parseInt(id) },
+  });
+  if (!emergency) return reply.code(404).send({ error: "Not found" });
+  if (emergency.userId !== userId)
+    return reply.code(403).send({ error: "Not your emergency" });
 
   const updated = await prisma.emergency.update({
     where: { id: parseInt(id) },
-    data: { status: 'CANCELLED' }
+    data: { status: "CANCELLED" },
   });
 
   // notify responders in the room
-  request.server.broadcastToRoom(id, { type: 'emergencyCancelled', emergencyId: id });
+  request.server.broadcastToRoom(id, {
+    type: "emergencyCancelled",
+    emergencyId: id,
+  });
 
   reply.send(updated);
 }
@@ -112,27 +161,27 @@ export async function responderAccept(request, reply) {
   // update ResponderEmergency record
   const re = await prisma.responderEmergency.updateMany({
     where: { emergencyId: parseInt(id), responderId: responderId },
-    data: { accepted: true, respondedAt: new Date() }
+    data: { accepted: true, respondedAt: new Date() },
   });
   // set emergency status to ACCEPTED if needed
   const updatedEmergency = await prisma.emergency.update({
     where: { id: parseInt(id) },
-    data: { status: 'ACCEPTED' }
+    data: { status: "ACCEPTED" },
   });
 
   // Notify emergency creator (user)
   const em = await prisma.emergency.findUnique({ where: { id: parseInt(id) } });
   request.server.sendToUser(em.userId, {
-    type: 'responderAccepted',
+    type: "responderAccepted",
     emergencyId: id,
-    responderId
+    responderId,
   });
 
   // Also notify other responders (optional) to stop trying
   request.server.broadcastToRoom(id, {
-    type: 'responderAcceptedBroadcast',
+    type: "responderAcceptedBroadcast",
     emergencyId: id,
-    responderId
+    responderId,
   });
 
   return reply.send({ success: true, updatedEmergency });
@@ -143,8 +192,12 @@ export async function responderReject(request, reply) {
   const responderId = request.user.id;
   await prisma.responderEmergency.updateMany({
     where: { emergencyId: parseInt(id), responderId },
-    data: { accepted: false, respondedAt: new Date() }
+    data: { accepted: false, respondedAt: new Date() },
   });
-  request.server.broadcastToRoom(id, { type: 'responderRejected', emergencyId: id, responderId });
+  request.server.broadcastToRoom(id, {
+    type: "responderRejected",
+    emergencyId: id,
+    responderId,
+  });
   return reply.send({ success: true });
 }
