@@ -5,7 +5,7 @@ import { prisma } from "../utils/prisma.js";
 
 export async function signup(request, reply) {
   try {
-    const { name, email, password, role, phone } = request.body;
+    const { name, email, password, role, phone, location } = request.body;
     const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser)
       return reply.code(400).send({ error: "Email already in use" });
@@ -13,7 +13,7 @@ export async function signup(request, reply) {
     const hashedPassword = await bcrypt.hash(password, 7);
 
     const user = await prisma.user.create({
-      data: { name, email, password: hashedPassword, role, phone },
+      data: { name, email, password: hashedPassword, role, phone, location },
     });
 
     const token = jwt.sign(
